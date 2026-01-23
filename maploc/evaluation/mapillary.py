@@ -3,6 +3,7 @@
 import argparse
 from pathlib import Path
 from typing import Optional, Tuple
+import csv
 
 from omegaconf import OmegaConf, DictConfig
 
@@ -64,13 +65,21 @@ split_munich = {
                  ],
             },
          }
-
+# Add this near line 73 (above split_configs)
+split_gmu = {
+    "val": {
+        "scenes": [
+            "gmu_robot"  # This MUST match the folder name in datasets/
+        ],
+    },
+}
 split_configs = {
     "mgl": split_mgl,
     "taipei": split_taipei,
     "brisbane": split_brisbane,
     "detroit": split_detroit,
     "munich": split_munich,
+    "gmu_robot":split_gmu
 }
 
 
@@ -91,8 +100,8 @@ def run(
         data_cfg_train,
         {
             "return_gps": True,
-            "add_map_mask": True,
-            "max_init_error": 32,
+            "add_map_mask": False,
+            "max_init_error": 10,
             "loading": {"val": {"batch_size": 1, "num_workers": 0}},
         },
     )
@@ -101,8 +110,8 @@ def run(
         {
             **default_cfg_single,
             "chunking": {
-                "min_length": 3,
-                "max_length": 10
+                "min_length": 30,
+                "max_length": 100
             },
         }
     )

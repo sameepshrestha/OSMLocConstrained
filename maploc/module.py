@@ -1,7 +1,9 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 from pathlib import Path
-
+import torch
+import omegaconf
+torch.serialization.add_safe_globals([omegaconf.dictconfig.DictConfig, omegaconf.listconfig.ListConfig])
 import pytorch_lightning as pl
 import torch
 from omegaconf import DictConfig, OmegaConf, open_dict
@@ -91,10 +93,11 @@ class GenericModule(pl.LightningModule):
         find_best=False,
     ):
         assert hparams_file is None, "hparams are not supported."
-
         checkpoint = torch.load(
-            checkpoint_path, map_location=map_location or (lambda storage, loc: storage)
-        )
+        checkpoint_path, 
+        map_location=map_location or (lambda storage, loc: storage),
+        weights_only=False  # <--- Add this here
+    )
         if find_best:
             best_score, best_name = None, None
             modes = {"min": torch.lt, "max": torch.gt}

@@ -1,0 +1,4 @@
+- model.name=mia_osmloc
+- experiment.name=mia_run_01
+- +model.mia_checkpoint=/home/sameep/phd_research/osmloc/MapItAnywhereLocalization/mapper/weights/mapper-excl-ood/model.ckpt
+- +model.mia_config_path=/home/sameep/phd_research/osmloc/MapItAnywhereLocalization/mapper/conf/pretrain.yaml

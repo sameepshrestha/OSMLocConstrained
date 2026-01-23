@@ -1,0 +1,3 @@
+- model.name=mia_osmloc
+- experiment.name=mip_osmloc
+- +model.mia_checkpoint=/home/sameep/phd_research/osmloc/MapItAnywhereLocalization/mapper/weights/mapper-excl-ood/model.ckpt

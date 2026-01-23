@@ -6,13 +6,15 @@ from typing import Callable, Dict, Optional, Tuple
 from pathlib import Path
 import os
 
+
 import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 from torchmetrics import MetricCollection
 from pytorch_lightning import seed_everything
 from tqdm import tqdm
-
+import csv
+from pathlib import Path
 from .. import logger, EXPERIMENTS_PATH
 from ..data.torch import collate, unbatch_to_device
 from ..models.voting import argmax_xyr, fuse_gps
@@ -22,8 +24,14 @@ from ..module import GenericModule
 from ..utils.io import download_file, DATA_URL
 from .viz import plot_example_single, plot_example_sequential
 from .utils import write_dump
+import matplotlib
+matplotlib.use('Agg') # This tells Matplotlib NOT to open windows
 import matplotlib.pyplot as plt
+from maploc.utils.geo import Projection
 
+# Example: pick the robot's start location
+lat0, lon0 =38.831337, -77.308682 # change to your map origin
+proj = Projection(lat0, lon0)
 def fea_vis(img, f_bev, f_map, uv_gt,yaw_gt, save_path):
 
     ratios = [img.shape[2] / img.shape[1], f_bev.shape[2] / f_bev.shape[1], f_map.shape[2] / f_map.shape[1]]
@@ -85,20 +93,50 @@ def fea_vis(img, f_bev, f_map, uv_gt,yaw_gt, save_path):
 pretrained_models = dict(
     eval_ckpt=("./experiments/loca_polar_small.ckpt", dict(num_rotations=256)),
 )
+def save_prediction_to_csv(writer, frame_name, canvas, pred_uv, prior_latlon, gt_latlon, method_name):
+    """
+    Converts model pixel predictions back to Lat/Lon and writes to CSV.
+    """
+    # Convert Predicted UV Pixels -> Metric XY
+    xy_pred = canvas.to_xy(pred_uv.cpu().double())
 
+    # Convert XY -> lat/lon using the global Projection instance
+    latlon_pred = proj.unproject(xy_pred.cpu().numpy())
+
+    # Extract values safely
+    if prior_latlon is not None:
+        p_lat, p_lon = prior_latlon[0], prior_latlon[1]
+    else:
+        p_lat, p_lon = None, None
+
+    if gt_latlon is not None:
+        g_lat, g_lon = gt_latlon[0], gt_latlon[1]
+    else:
+        g_lat, g_lon = None, None
+
+    r_lat, r_lon = latlon_pred[0], latlon_pred[1]
+
+    writer.writerow([
+        frame_name, method_name,
+        p_lat, p_lon,       # Input Noisy GPS
+        g_lat, g_lon,       # Ground Truth (if provided)
+        r_lat, r_lon        # AI Prediction
+    ])
 
 
 @torch.no_grad()
 def evaluate_single_image(
     dataloader: torch.utils.data.DataLoader,
     model: GenericModule,
+    csv_writer: Optional[any] = None, 
     num: Optional[int] = None,
     callback: Optional[Callable] = None,
     progress: bool = True,
     mask_index: Optional[Tuple[int]] = None,
     has_gps: bool = False,
     test_scale: bool = False
-):
+):  
+    start_frame = 900
     ppm = model.model.conf.pixel_per_meter
     metrics = MetricCollection(model.model.metrics())
     metrics["directional_error"] = LateralLongitudinalError(ppm)
@@ -116,13 +154,38 @@ def evaluate_single_image(
     for i, batch_ in enumerate(
         islice(tqdm(dataloader, total=num, disable=not progress), num)
     ):
-
+        if i <784:
+            continue
         batch = model.transfer_batch_to_device(batch_, model.device, i)
         # Ablation: mask semantic classes
         if mask_index is not None:
             mask = batch["map"][0, mask_index[0]] == (mask_index[1] + 1)
             batch["map"][0, mask_index[0]][mask] = 0
         pred = model(batch)
+        print(pred.keys())
+        if csv_writer:
+            canvas = batch_["canvas"][0]
+
+            # Prediction UV
+            pred_uv = pred["uv_max"][0]
+
+            # Convert prediction to XY
+            pred_xy = canvas.to_xy(pred_uv.double())
+
+            # Convert predicted XY → lat/lon
+            pred_latlon = proj.unproject(pred_xy.cpu().numpy())
+
+            save_prediction_to_csv(
+                csv_writer,
+                batch_["name"][0],  # frame name
+                canvas,
+                pred_uv,            # uv coords
+                pred_latlon,        # predicted lat/lon
+                None,               # optionally ground truth lat/lon if you have it
+                "single_frame"
+            )
+
+
         
 
         if has_gps:
@@ -157,6 +220,7 @@ def evaluate_sequential(
     num_rotations: int = 512,
     mask_index: Optional[Tuple[int]] = None,
     has_gps: bool = False,
+    csv_writer=None,
 ):
     chunk_keys = list(chunk2idx)
     if shuffle:
@@ -191,9 +255,12 @@ def evaluate_sequential(
     if viz:
         keys_save.append("log_probs")
 
+
     for chunk_index, key in enumerate(tqdm(chunk_keys, disable=not progress)):
         indices = chunk2idx[key]
         aligner = RigidAligner(track_priors=viz, num_rotations=num_rotations)
+        smooth_xy = None #my addition 
+        max_step = 1.5 #addition 2
         if has_gps:
             aligner_gps = GPSAligner(track_priors=viz, num_rotations=num_rotations)
         batches = []
@@ -204,7 +271,19 @@ def evaluate_sequential(
             pred = model(collate([data])) # pred for image_i
 
             canvas = data["canvas"] # canvas map?
-            data["xy_geo"] = xy = canvas.to_xy(data["uv"].double()) # gt_uv (relative) --> gt_xy (absolute) ? 
+            
+            #data["xy_geo"] = xy = canvas.to_xy(data["uv"].double()) # gt_uv (relative) --> gt_xy (absolute) ? 
+            current_gps_xy = canvas.to_xy(data["uv"].double()) #addition 3
+            if smooth_xy is None:
+                smooth_xy = current_gps_xy
+            else:
+                diff = current_gps_xy-smooth_xy
+                dist = torch.linalg.norm(diff)
+                if dist > max_step:
+                    smooth_xy = smooth_xy + (diff/dist)*max_step
+                else:
+                    smooth_xy = current_gps_xy #addition 11.
+            data["xy_geo"]=xy = smooth_xy
             data["yaw"] = yaw = data["roll_pitch_yaw"][-1].double() # gt_yaw
             aligner.update(pred["log_probs"][0], canvas, xy, yaw) # log_prob map for image_i xy(absolute) and yaw
 
@@ -231,6 +310,34 @@ def evaluate_sequential(
         for i in range(len(indices)):
             preds[i]["uv_seq"] = batches[i]["canvas"].to_uv(xy_seq[i]).float()
             preds[i]["yaw_seq"] = yaw_seq[i].float()
+            if csv_writer:
+                canvas = batches[i]["canvas"]
+                pred_uv = preds[i]["uv_seq"]
+
+                # Convert predicted XY → lat/lon
+                pred_xy = canvas.to_xy(pred_uv.double())
+                pred_latlon = proj.unproject(pred_xy.cpu().numpy())
+
+                # Get Ground Truth Lat/Lon from the batch
+                gt_uv = batches[i]["uv"]
+                gt_xy = canvas.to_xy(gt_uv.double())
+                gt_latlon = proj.unproject(gt_xy.cpu().numpy())
+                
+                # Get Prior (GPS) Lat/Lon if available
+                prior_latlon = None
+                if "uv_gps" in batches[i]:
+                    prior_xy = canvas.to_xy(batches[i]["uv_gps"][0].double())
+                    prior_latlon = proj.unproject(prior_xy.cpu().numpy())
+
+                save_prediction_to_csv(
+                    csv_writer,
+                    batches[i]["name"],  # Frame name
+                    canvas,
+                    pred_uv,
+                    prior_latlon,
+                    gt_latlon,
+                    "sequential_rigid" # Or "ekf" / "particle"
+                )
             if has_gps:
                 preds[i]["uv_gps_seq"] = (
                     batches[i]["canvas"].to_uv(xy_gps_seq[i]).float()
@@ -254,6 +361,7 @@ def evaluate_particle(
     num_rotations: int = 512,
     mask_index: Optional[Tuple[int]] = None,
     has_gps: bool = False,
+    csv_writer = None,
 ):
     chunk_keys = list(chunk2idx)
     if shuffle:
@@ -336,6 +444,34 @@ def evaluate_particle(
         for i in range(len(indices)):
             preds[i]["uv_seq"] = batches[i]["canvas"].to_uv(xy_seq[i]).float()
             preds[i]["yaw_seq"] = yaw_seq[i].float()
+            if csv_writer:
+                canvas = batches[i]["canvas"]
+                pred_uv = preds[i]["uv_seq"]
+
+                # Convert predicted XY → lat/lon
+                pred_xy = canvas.to_xy(pred_uv.double())
+                pred_latlon = proj.unproject(pred_xy.cpu().numpy())
+
+                # Get Ground Truth Lat/Lon from the batch
+                gt_uv = batches[i]["uv"]
+                gt_xy = canvas.to_xy(gt_uv.double())
+                gt_latlon = proj.unproject(gt_xy.cpu().numpy())
+                
+                # Get Prior (GPS) Lat/Lon if available
+                prior_latlon = None
+                if "uv_gps" in batches[i]:
+                    prior_xy = canvas.to_xy(batches[i]["uv_gps"][0].double())
+                    prior_latlon = proj.unproject(prior_xy.cpu().numpy())
+
+                save_prediction_to_csv(
+                    csv_writer,
+                    batches[i]["name"],  # Frame name
+                    canvas,
+                    pred_uv,
+                    prior_latlon,
+                    gt_latlon,
+                    "sequential_particle" # Or "ekf" / "particle"
+                )
             if has_gps:
                 preds[i]["uv_gps_seq"] = (
                     batches[i]["canvas"].to_uv(xy_gps_seq[i]).float()
@@ -359,6 +495,7 @@ def evaluate_ekf(
     num_rotations: int = 512,
     mask_index: Optional[Tuple[int]] = None,
     has_gps: bool = False,
+    csv_writer =None
 ):
     chunk_keys = list(chunk2idx)
     if shuffle:
@@ -386,8 +523,7 @@ def evaluate_ekf(
         metrics["xy_gps_seq_error"] = Location2DError("uv_gps_seq", ppm)
         metrics["yaw_gps_seq_error"] = AngleError("yaw_gps_seq")
     metrics = metrics.to(model.device)
-
-    keys_save = ["uvr_max", "uv_max", "yaw_max"]
+    keys_save = ["uvr_max", "uv_max", "yaw_max", "uv_expectation"] 
     if has_gps:
         keys_save.append("uv_gps")
     if viz:
@@ -413,6 +549,7 @@ def evaluate_ekf(
             # xyr = torch.cat([xy,yaw[...,None]],dim = -1) # [B,3]
             data["xy_geo"] = xy = canvas.to_xy(data["uv"].float()) # gt_uv (relative) --> gt_xy (absolute) ? 
             data["yaw"] = yaw = data["roll_pitch_yaw"][-1].float() # gt_yaw
+           # is_first = (i == indices[0])
             xyr_seq = aligner.update(pred["log_probs"][0].exp(), canvas, xy, yaw,xy_max[0],yaw_max[0]) # log_prob map for image_i xy(absolute) and yaw
             # print(xyr_seq)
             xy_seq.append(xyr_seq[:2])
@@ -443,6 +580,34 @@ def evaluate_ekf(
         for i in range(len(indices)):
             preds[i]["uv_seq"] = batches[i]["canvas"].to_uv(xy_seq[i]).float()
             preds[i]["yaw_seq"] = yaw_seq[i].float()
+            if csv_writer:
+                canvas = batches[i]["canvas"]
+                pred_uv = preds[i]["uv_seq"]
+
+                # Convert predicted XY → lat/lon
+                pred_xy = canvas.to_xy(pred_uv.double())
+                pred_latlon = proj.unproject(pred_xy.cpu().numpy())
+
+                # Get Ground Truth Lat/Lon from the batch
+                gt_uv = batches[i]["uv"]
+                gt_xy = canvas.to_xy(gt_uv.double())
+                gt_latlon = proj.unproject(gt_xy.cpu().numpy())
+                
+                # Get Prior (GPS) Lat/Lon if available
+                prior_latlon = None
+                if "uv_gps" in batches[i]:
+                    prior_xy = canvas.to_xy(batches[i]["uv_gps"][0].double())
+                    prior_latlon = proj.unproject(prior_xy.cpu().numpy())
+
+                save_prediction_to_csv(
+                    csv_writer,
+                    batches[i]["name"],  # Frame name
+                    canvas,
+                    pred_uv,
+                    prior_latlon,
+                    gt_latlon,
+                    "sequential_ekf" # Or "ekf" / "particle"
+                )
             if has_gps:
                 preds[i]["uv_gps_seq"] = (
                     batches[i]["canvas"].to_uv(xy_gps_seq[i]).float()
@@ -470,14 +635,10 @@ def evaluate(
     experiment: str = None,
     **kwargs,
 ):
-    
-    model = GenericModule.load_from_checkpoint(
-            checkpoint, cfg=cfg, find_best = False
-        )
+
+    model = GenericModule.load_from_checkpoint(checkpoint, cfg=cfg, find_best=False)
     logger.info("Evaluating model %s with config %s", checkpoint, cfg)
-    
-    
-    print(str(model.model.__class__))
+
     model = model.eval()
     if torch.cuda.is_available():
         model = model.cuda()
@@ -485,19 +646,34 @@ def evaluate(
     dataset.prepare_data()
     dataset.setup()
 
+    csv_writer = None
     if output_dir is not None:
         output_dir.mkdir(exist_ok=True, parents=True)
+
+        # CSV setup
+        csv_path = output_dir / "predictions.csv"
+        file_exists = csv_path.exists()
+        csv_file = open(csv_path, 'a', newline='')
+        csv_writer = csv.writer(csv_file)
+        if not file_exists or csv_path.stat().st_size == 0:
+            csv_writer.writerow([
+                "name", "method", "prior_lat", "prior_lon",
+                "gt_lat", "gt_lon", "pred_lat", "pred_lon"
+            ])
+        kwargs['csv_writer'] = csv_writer
+
+        # Plot callback setup
         if callback is None:
             if sequential:
                 callback = plot_example_sequential
             else:
                 callback = plot_example_single
-            callback = functools.partial(
-                callback, out_dir=output_dir, **(viz_kwargs or {})
-            )
-    kwargs = {**kwargs, "callback": callback}
+            callback = functools.partial(callback, out_dir=output_dir, **(viz_kwargs or {}))
+
+    kwargs['callback'] = callback
 
     seed_everything(dataset.cfg.seed)
+
     if sequential:
         dset, chunk2idx = dataset.sequence_dataset(split, **cfg.chunking)
         if particle:
@@ -507,12 +683,19 @@ def evaluate(
         else:
             metrics = evaluate_sequential(dset, chunk2idx, model, **kwargs)
     else:
-        loader = dataset.dataloader(split, shuffle=True, num_workers=num_workers)
+        loader = dataset.dataloader(split, shuffle=False, num_workers=num_workers)
         metrics = evaluate_single_image(loader, model, **kwargs)
 
     results = metrics.compute()
     logger.info("All results: %s", results)
+
     if output_dir is not None:
         write_dump(output_dir, experiment, cfg, results, metrics)
         logger.info("Outputs have been written to %s.", output_dir)
+
+        if csv_writer is not None:
+            csv_file.close()  # close CSV file properwwwwly
+
     return metrics
+
+"""(osmloc) sameep@ENMA:~/phd_research/osmloc/OSMLocConstrained$ python3 -m maploc.evaluation.mapillary     --checkpoint "./checkpoints/loca_polar_base.ckpt"     --dataset "gmu_robot"     --output_dir "./experiments/viz_gmu_robot"     data.data_dir="$(pwd)/datasets"     data.split="split_gmu.json"     model.num_rotations=256     data.loading.val.num_workers=0     model.image_encoder.val=True"""

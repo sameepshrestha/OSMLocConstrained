@@ -1,0 +1,59 @@
+import pandas as pd
+import numpy as np
+from filterpy.kalman import KalmanFilter
+from filterpy.common import Q_discrete_white_noise
+from maploc.utils.geo import Projection
+
+# ==========================
+# CONFIGURATION
+# ==========================
+LAT0, LON0 = 38.831337, -77.308682
+MAX_JUMP = 3.0  # Velocity Gate (Meters)
+# R is measurement noise. Higher R = ignore jittery AI, follow the smooth path.
+MEASUREMENT_NOISE = 5.0 
+
+def apply_advanced_smoothing(input_csv, output_csv):
+    proj = Projection(LAT0, LON0)
+    df = pd.read_csv(input_csv)
+    df['name_int'] = pd.to_numeric(df['name'])
+    df = df.sort_values('name_int').reset_index(drop=True)
+
+    # Convert to XY Meters
+    xy = np.stack([proj.project([lat, lon]) for lat, lon in zip(df['pred_lat'], df['pred_lon'])])
+    
+    # Setup Kalman Filter (4 states: x, y, vx, vy)
+    kf = KalmanFilter(dim_x=4, dim_z=2)
+    dt = 0.1 # Assumed time between frames
+    
+    # State Transition Matrix
+    kf.F = np.array([[1, 0, dt, 0],
+                     [0, 1, 0, dt],
+                     [0, 0, 1, 0],
+                     [0, 0, 0, 1]])
+    
+    # Measurement Matrix (We only observe x, y)
+    kf.H = np.array([[1, 0, 0, 0],
+                     [0, 1, 0, 0]])
+    
+    kf.P *= 100.  # Initial uncertainty
+    kf.R *= MEASUREMENT_NOISE # Measurement noise
+    kf.Q = Q_discrete_white_noise(dim=2, dt=dt, var=0.1, block_size=2) # Process noise
+
+    # Forward Pass with Outlier Gating
+    mu, cov, _, _ = kf.batch_filter(xy)
+
+    # Backward Pass (RTS Smoothing)
+    # This is what makes the path "perfectly" smooth for the satellite eye-test
+    M, P, C, _ = kf.rts_smoother(mu, cov)
+
+    # Convert smoothed XY back to Lat/Lon
+    final_coords = np.stack([proj.unproject([x, y]) for x, y in zip(M[:, 0], M[:, 1])])
+    
+    df['pred_lat'] = final_coords[:, 0]
+    df['pred_lon'] = final_coords[:, 1]
+    
+    df.to_csv(output_csv, index=False)
+    print(f"✅ RTS Smoothing Complete. Output: {output_csv}")
+
+if __name__ == "__main__":
+    apply_advanced_smoothing("experiments/viz_gmu_robot/predictions.csv", "experiments/viz_gmu_robot/filtered_predictions.csv")

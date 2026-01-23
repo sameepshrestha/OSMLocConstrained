@@ -1,0 +1,63 @@
+# ======================
+# Large data / datasets
+# ======================
+*.bag
+*.csv
+*.h5
+*.npz
+*.npy
+
+datasets/
+puqi_dataset_*/
+my_raw_images/
+test_gnd/
+tiles_prepare.py
+fairfax_campus.json
+
+# ======================
+# Results / outputs
+# ======================
+all_results/
+experiments/
+visualization/
+visualizations/
+analysis_*.html
+
+# ======================
+# Checkpoints / models
+# ======================
+checkpoints/
+*.ckpt
+*.pth
+*.pt
+*.onnx
+
+# ======================
+# ROS / logs
+# ======================
+*.log
+*.db3
+
+# ======================
+# Python cache
+# ======================
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# ======================
+# Temporary / scratch scripts
+# ======================
+csv_to_mgl.py
+data_correcter.py
+gnd_dataset.py
+rostodataset.py
+split_mgl.py
+viwssualization.py
+
+# ======================
+# IDE / OS
+# ======================
+.vscode/
+.idea/
+.DS_Store

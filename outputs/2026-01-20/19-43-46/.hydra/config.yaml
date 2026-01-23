@@ -1,0 +1,103 @@
+data:
+  name: mapillary
+  scenes:
+  - sanfrancisco_soma
+  - sanfrancisco_hayes
+  - amsterdam
+  - berlin
+  - lemans
+  - montrouge
+  - toulouse
+  - nantes
+  - vilnius
+  - avignon
+  - helsinki
+  - milan
+  - paris
+  split: splits_MGL_13loc.json
+  loading:
+    train:
+      batch_size: 4
+      num_workers: ${.batch_size}
+    val:
+      batch_size: ${..train.batch_size}
+      num_workers: ${.batch_size}
+  num_classes:
+    areas: 7
+    ways: 10
+    nodes: 33
+  pixel_per_meter: 2
+  crop_size_meters: 64
+  max_init_error: 48
+  add_map_mask: true
+  resize_image: 512
+  pad_to_square: true
+  rectify_pitch: true
+  augmentation:
+    rot90: true
+    flip: true
+    image:
+      apply: true
+experiment:
+  name: mia_run_01
+  gpus: 1
+  seed: 0
+training:
+  lr: 0.0001
+  lr_scheduler: null
+  finetune_from_checkpoint: null
+  trainer:
+    val_check_interval: 20000
+    log_every_n_steps: 100
+    limit_val_batches: 1.0
+    max_steps: 500000
+    devices: ${experiment.gpus}
+  checkpointing:
+    monitor: loss/nll/val
+    save_top_k: -1
+    mode: min
+model:
+  name: mia_osmloc
+  latent_dim: 128
+  matching_dim: 8
+  z_max: 32
+  x_max: 32
+  pixel_per_meter: ${data.pixel_per_meter}
+  num_scale_bins: 33
+  num_rotations: 64
+  image_encoder:
+    encoder: vitb
+    features: 128
+    out_dim: ${model.latent_dim}
+    out_channels:
+    - 96
+    - 192
+    - 384
+    - 768
+    ckpt: checkpoints/depth_anything/depth_anything_${.encoder}14.pth
+    shallow_encoder:
+      backbone:
+        encoder: resnet101
+  map_encoder:
+    embedding_dim: 16
+    output_dim: ${..matching_dim}
+    num_classes: ${data.num_classes}
+    backbone:
+      encoder: vgg19
+      pretrained: false
+      output_scales:
+      - 0
+      num_downsample: 3
+      decoder:
+      - 128
+      - 64
+      - 64
+      padding: replicate
+    unary_prior: false
+  bev_net:
+    num_blocks: 4
+    latent_dim: ${..latent_dim}
+    output_dim: ${..matching_dim}
+    confidence: true
+  mia_checkpoint: /home/sameep/phd_research/osmloc/MapItAnywhereLocalization/mapper/weights/mapper-excl-ood/model.ckpt
+  mia_config_path: /home/sameep/phd_research/osmloc/MapItAnywhereLocalization/mapper/conf/

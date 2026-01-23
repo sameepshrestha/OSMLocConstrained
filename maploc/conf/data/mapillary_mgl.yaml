@@ -2,7 +2,6 @@ name: mapillary
 scenes:
   - sanfrancisco_soma
   - sanfrancisco_hayes
-  - amsterdam
   - berlin
   - lemans
   - montrouge

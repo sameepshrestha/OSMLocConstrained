@@ -3,7 +3,7 @@
 import os.path as osp
 from typing import Optional
 from pathlib import Path
-
+from pytorch_lightning.loggers import CometLogger
 import hydra
 import pytorch_lightning as pl
 import torch
@@ -13,7 +13,7 @@ from pytorch_lightning.utilities import rank_zero_only
 from . import logger, pl_logger, EXPERIMENTS_PATH
 from .data import modules as data_modules
 from .module import GenericModule
-
+import numpy as np 
 
 class CleanProgressBar(pl.callbacks.TQDMProgressBar):
     def get_metrics(self, trainer, model):
@@ -161,8 +161,15 @@ def train(cfg: DictConfig, job_id: Optional[int] = None):
             )
     data = data_modules[cfg.data.get("name", "mapillary")](cfg.data)
 
-    tb_args = {"name": cfg.experiment.name, "version": ""}
-    tb = pl.loggers.TensorBoardLogger(EXPERIMENTS_PATH, **tb_args)
+    # Initialize Comet
+    comet_logger = CometLogger(
+        api_key="fC6GESL10yERCjD7gVOyHc5S2", # Or leave blank if using .comet.config
+        project_name="mia-osmloc",
+        workspace="sameep54",
+        experiment_name=cfg.experiment.name,
+    )
+
+    # In the callbacks list, add the logger
 
     callbacks = [
         checkpointing_epoch,
@@ -181,7 +188,7 @@ def train(cfg: DictConfig, job_id: Optional[int] = None):
         enable_model_summary=False,
         sync_batchnorm=True,
         enable_checkpointing=True,
-        logger=tb,
+        logger=comet_logger,
         callbacks=callbacks,
         strategy=strategy,
         check_val_every_n_epoch=1,
@@ -193,7 +200,7 @@ def train(cfg: DictConfig, job_id: Optional[int] = None):
 
 
 @hydra.main(
-    config_path=osp.join(osp.dirname(__file__), "conf"), config_name="osmloc_small"
+    config_path=osp.join(osp.dirname(__file__), "conf"), config_name="osmloc_base"
 )
 def main(cfg: DictConfig) -> None:
     train(cfg)
