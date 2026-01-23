@@ -1,0 +1,3 @@
+[submodule "OpenSfM"]
+	path = OpenSfM
+	url = https://github.com/mapillary/OpenSfM.git
