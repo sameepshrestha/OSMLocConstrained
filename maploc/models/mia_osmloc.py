@@ -7,13 +7,28 @@ from .map_encoder import MapEncoder
 # Since you symlinked mapper to the root, use top-level import
 from mapper.module import GenericModule 
 from .voting import (
-    argmax_xyr, conv2d_fft_batchwise, expectation_xyr,
-    log_softmax_spatial, mask_yaw_prior, TemplateSampler, topk_xyr
+    argmax_xyr,
+    conv2d_fft_batchwise,
+    expectation_xyr,
+    log_softmax_spatial,
+    mask_yaw_prior,
+    nll_loss_xyr,
+    nll_loss_xyr_smoothed,
+    nll_normal_loss_xyr,
+    res_l1loss_xyr,
+    depth_loss,
+    res_sem_xyr,
+    topk_xyr,
+    TemplateSampler,
 )
 from .bev_projection import make_grid
 import os
 import yaml
 import numpy as np 
+from .map_encoder import MapEncoder
+from .metrics import AngleError, AngleRecall, Location2DError, Location2DRecall
+from .depth_anything.dpt import DepthAnything
+
 class osmloc(BaseModel):
     default_conf = {
         # Your MIA keys
@@ -35,9 +50,6 @@ class osmloc(BaseModel):
         "image_encoder": None, 
         "bev_net": None,
     }
-    
-    # ... rest of your code ...
-
 
     def _init(self, conf):
         ckpt_path = conf.mia_checkpoint
@@ -64,7 +76,23 @@ class osmloc(BaseModel):
 
         # 3. Semantic Bridge (The 1x1 Embedding Translator)
         # We translate the 6 MIA probability channels into the high-dim Map features (e.g. 128)
-        self.feature_adapter = nn.Conv2d(6,48, kernel_size=1)
+        # In your osmloc class
+        self.feature_adapter = nn.Sequential(
+            nn.Conv2d(6, 32, kernel_size=1),
+            nn.BatchNorm2d(32), # Adds stability so gradients don't explode
+            nn.ReLU(),
+            nn.Conv2d(32, 8, kernel_size=1)
+
+        )
+        self.feature_adapter1 = nn.Sequential(
+            nn.Conv2d(6, 32, kernel_size=1),
+            nn.BatchNorm2d(32), # Adds stability so gradients don't explode
+            nn.ReLU(),
+            nn.Conv2d(32, 128, kernel_size=1)
+        )
+        self.sem_classifier = torch.nn.Sequential(torch.nn.Conv2d(conf.latent_dim,conf.map_encoder.embedding_dim,1),
+                                                            torch.nn.BatchNorm2d(conf.map_encoder.embedding_dim),torch.nn.ReLU(),
+                                                            torch.nn.Conv2d(conf.map_encoder.embedding_dim,conf.map_encoder.embedding_dim * 3 ,1))
 
         # 4. Rotational Matcher Setup
         ppm = conf.pixel_per_meter
@@ -81,6 +109,20 @@ class osmloc(BaseModel):
         self.template_sampler = TemplateSampler(grid_xz, ppm, conf.num_rotations)
 
     def _forward(self, data):
+         # If the data has ID 12, it crashes. We check this here.
+        if hasattr(self.map_encoder, "embeddings"):
+            keys = ["areas", "ways", "nodes"]
+            for i, key in enumerate(keys):
+                if key in self.map_encoder.embeddings:
+                    # Get the maximum allowed ID for this layer
+                    limit = self.map_encoder.embeddings[key].num_embeddings
+                    
+                    # Check if any pixel in the batch exceeds this limit
+                    if (data["map"][:, i] >= limit).any():
+                        print(f"\n[SKIP] Batch contains invalid Map ID for '{key}'. Max allowed: {limit-1}")
+                        # Return a special flag. We will catch this in the loss function.
+                        return {"_SKIP_BATCH": True}
+
         pred = {}
         
         # --- Map Reference Path ---
@@ -115,6 +157,7 @@ class osmloc(BaseModel):
             print(f"!!! MISMATCH DETECTED: {f_bev_raw.shape[-1]} vs {valid_bev.shape[-1]} !!!")
         # Translate semantic classes into map-features (e.g. 6 -> 128)
         f_bev = self.feature_adapter(f_bev_raw)
+        f_bev_fea = self.sem_classifier(self.feature_adapter1(f_bev_raw))
 
         # Matching: Slide rotated image-templates over the global map
         # Output: scores [B, 256, 128, 128] (matches height/width of f_map)
@@ -144,12 +187,15 @@ class osmloc(BaseModel):
             "uv_max": uvr_max[..., :2],
             "yaw_max": uvr_max[..., 2],
             "uvr_expectation": uvr_avg,
+            "uv_expectation": uvr_avg[..., :2],
+
             "features_bev": f_bev, 
             "features_map": f_map,
             "features_map_sem": embedding_map,
             # Ensure mask is 2D for loss/metrics
             "valid_bev": valid_bev.squeeze(1) if valid_bev.dim()==4 else valid_bev,
             "valid_template": valid_template,
+            "features_bev":f_bev_fea,
         }
 
     def _forward_wrapper(self, data):
@@ -183,27 +229,51 @@ class osmloc(BaseModel):
         return scores, templates, valid_templates
 
     def loss(self, pred, data):
-        from .voting import nll_loss_xyr, res_l1loss_xyr
-        xy_gt = data["uv"]
-        yaw_gt = data["roll_pitch_yaw"][..., -1]
-        
-        # Localization (Geometry) loss
-        nll = nll_loss_xyr(pred["log_probs"], xy_gt, yaw_gt)
-        
-        # Alignment (Semantic) loss - aligns Adapter + Map features to be similar
-        # We match MIA-translated-features to OSM-embedded-features
-        res = 10.0 * res_l1loss_xyr(
-            pred["features_bev"], 
-            pred["features_map_sem"], 
-            xy_gt, yaw_gt, pred["valid_bev"]
-        )
-        return {"total": nll + res, "nll": nll, "loss_res": res}
+            if pred.get("_SKIP_BATCH"):
+                # Create a dummy zero loss that keeps the computation graph valid
+                zero_loss = sum(p.sum() for p in self.parameters() if p.requires_grad) * 0.0
+                return {"total": zero_loss, "nll": zero_loss}
+
+            xy_gt = data["uv"]
+            yaw_gt = data["roll_pitch_yaw"][..., -1]
+
+            _, H, W, _ = pred["log_probs"].shape
+            
+            out_of_bounds = (
+                (xy_gt[..., 0] < 0) | (xy_gt[..., 0] >= W) |
+                (xy_gt[..., 1] < 0) | (xy_gt[..., 1] >= H)
+            )
+
+            if out_of_bounds.any():
+                print(f"\n[SKIP] Batch GT coords out of map bounds ({W}x{H}).")
+                zero_loss = pred["log_probs"].sum() * 0.0
+                return {"total": zero_loss, "nll": zero_loss}
+
+    
+            nll = nll_loss_xyr(pred["log_probs"], xy_gt, yaw_gt)
+
+            # ... rest of your loss code ...
+            loss_dict = {"total": nll, "nll": nll}
+            
+            # Add semantic loss if you have it
+            if "features_bev" in pred:
+                res = 10.0 * res_l1loss_xyr(pred["features_bev"], pred["features_map_sem"], xy_gt, yaw_gt, pred["valid_bev"])
+                loss_dict["total"] += res
+                loss_dict["loss_res"] = res
+
+            return loss_dict
 
     def metrics(self):
-        from .metrics import AngleError, AngleRecall, Location2DError, Location2DRecall
         return {
             "xy_max_error": Location2DError("uv_max", self.conf.pixel_per_meter),
+            "xy_expectation_error": Location2DError(
+                "uv_expectation", self.conf.pixel_per_meter
+            ),
             "yaw_max_error": AngleError("yaw_max"),
             "xy_recall_1m": Location2DRecall(1.0, self.conf.pixel_per_meter, "uv_max"),
+            "xy_recall_3m": Location2DRecall(3.0, self.conf.pixel_per_meter, "uv_max"),
+            "xy_recall_5m": Location2DRecall(5.0, self.conf.pixel_per_meter, "uv_max"),
             "yaw_recall_1°": AngleRecall(1.0, "yaw_max"),
+            "yaw_recall_3°": AngleRecall(3.0, "yaw_max"),
+            "yaw_recall_5°": AngleRecall(5.0, "yaw_max"),
         }

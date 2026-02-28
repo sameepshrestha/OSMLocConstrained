@@ -104,6 +104,7 @@ class MapillaryDataModule(pl.LightningDataModule):
         self.tile_managers = {}
         self.image_dirs = {}
         self.depth_dirs = {}
+        self.mask_dirs = {}
         names = []
 
         for scene in self.cfg.scenes:
@@ -152,6 +153,9 @@ class MapillaryDataModule(pl.LightningDataModule):
             )
             # assert self.depth_dirs[scene].exists(), self.depth_dirs[scene]
 
+            # semantic masks
+            self.mask_dirs[scene] = (self.local_dir or self.root) / scene / "semantic_masks"
+
             for seq, data in self.dumps[scene].items():
                 for name in data["views"]:
                     names.append((scene, seq, name))
@@ -164,7 +168,6 @@ class MapillaryDataModule(pl.LightningDataModule):
     def pack_data(self):
         # We pack the data into compact tensors that can be shared across processes without copy
         exclude = {
-            "compass_angle",
             "compass_accuracy",
             "gps_accuracy",
             "chunk_key",
@@ -283,6 +286,7 @@ class MapillaryDataModule(pl.LightningDataModule):
             self.image_dirs,
             self.tile_managers,
             depth_dirs = None,
+            mask_dirs = self.mask_dirs,
             image_ext=".jpg",
             depth_ext="_depth.png"
             

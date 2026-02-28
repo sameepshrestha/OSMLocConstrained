@@ -69,6 +69,7 @@ class MapLocDataset(torchdata.Dataset):
         image_dirs: Dict[str, Path],
         tile_managers: Dict[str, TileManager],
         depth_dirs: Dict[str, Path] = None,
+        mask_dirs: Dict[str, Path] = None,
         image_ext: str = "",
         depth_ext: str = "",
     ):
@@ -77,6 +78,7 @@ class MapLocDataset(torchdata.Dataset):
         self.data = data
         self.image_dirs = image_dirs
         self.depth_dirs = depth_dirs
+        self.mask_dirs = mask_dirs
         self.tile_managers = tile_managers
         self.names = names
         self.image_ext = image_ext
@@ -158,15 +160,57 @@ class MapLocDataset(torchdata.Dataset):
         uv_init = canvas.to_uv(bbox_tile.center)
         raster = canvas.raster  # C, H, W
 
+        # Load and align the semantic mask with the canvas crop.
+        # Mask is North-Up at 2 ppm, same as the canvas. Center pixel = GT (t_c2w).
+        # Canvas center = GT + init_error. Just shift center and slice.
+        semantic_mask = None
+        if getattr(self, "mask_dirs", None) is not None and self.mask_dirs.get(scene):
+            mask_dir = self.mask_dirs[scene]
+            mask_path = mask_dir / (name + ".npz")
+            if mask_path.exists():
+                mask_data = np.load(mask_path)["arr_0"].astype(np.float32)
+                if mask_data.shape[-1] == 9:
+                    mask_data = mask_data.transpose(2, 0, 1)  # (H,W,9) → (9,H,W)
+
+                C_m, H_m, W_m = mask_data.shape
+                H_c, W_c = raster.shape[-2], raster.shape[-1]
+                ppm = canvas.ppm  # 2.0
+
+                # How far did init_error shift the canvas center from GT?
+                dx_e = bbox_tile.center[0] - xy_w_gt[0]  # metres East
+                dx_n = bbox_tile.center[1] - xy_w_gt[1]  # metres North
+                off_c = int(round(dx_e * ppm))    # col: East → right
+                off_r = int(round(-dx_n * ppm))   # row: North → up (negative row)
+
+                # Top-left corner of the canvas crop on the mask
+                r0 = H_m // 2 + off_r - H_c // 2
+                c0 = W_m // 2 + off_c - W_c // 2
+
+                # Clamp source and destination ranges for boundary safety
+                sr0, dr0 = max(r0, 0),       max(-r0, 0)
+                sc0, dc0 = max(c0, 0),       max(-c0, 0)
+                sr1 = min(r0 + H_c, H_m);    dr1 = H_c - max(r0 + H_c - H_m, 0)
+                sc1 = min(c0 + W_c, W_m);    dc1 = W_c - max(c0 + W_c - W_m, 0)
+
+                semantic_mask = np.zeros((C_m, H_c, W_c), dtype=np.float32)
+                semantic_mask[:, dr0:dr1, dc0:dc1] = mask_data[:, sr0:sr1, sc0:sc1]
+        
+        if semantic_mask is None:
+            semantic_mask = np.zeros((9, raster.shape[1], raster.shape[2]), dtype=np.float32)
+
         # Map augmentations
         flip = None
         heading = np.deg2rad(90 - yaw)  # fixme
         if self.stage == "train":
             if self.cfg.augmentation.rot90:
                 raster, uv_gt, heading = random_rot90(raster, uv_gt, heading, seed)
+                semantic_mask, _, _ = random_rot90(semantic_mask, np.zeros_like(uv_gt), 0, seed)
             if self.cfg.augmentation.flip:
-                image, depth, raster, uv_gt, heading,flip = random_flip(
+                image, depth, raster, uv_gt, heading, flip = random_flip(
                     image, depth, raster, uv_gt, heading, seed
+                )
+                _, _, semantic_mask, _, _, _ = random_flip(
+                    image, None, semantic_mask, np.zeros_like(uv_gt), 0, seed
                 )
         yaw = 90 - np.rad2deg(heading)  # fixme
 
@@ -210,6 +254,7 @@ class MapLocDataset(torchdata.Dataset):
             data["chunk_id"] = (scene, seq, self.data["chunk_index"][idx])
 
         raster = torch.from_numpy(np.ascontiguousarray(raster)).long()
+        semantic_mask = torch.from_numpy(np.ascontiguousarray(semantic_mask)).float()
         # raster_areas = [raster[:,0:1,:,:] == i for i in range(10)]
         # raster_ways = [raster[:,1:2,:,:] == i for i in range(10)]
         # raster_ways = self.dilation_way(raster_ways) # dilation
@@ -222,6 +267,7 @@ class MapLocDataset(torchdata.Dataset):
             "camera": cam,
             "canvas": canvas,
             "map": raster,
+            "semantic_mask": semantic_mask,
             # "map_areas": raster_areas,
             # "map_ways": raster_ways,
             "uv": torch.from_numpy(uv_gt).float(),  # TODO: maybe rename to uv?
@@ -259,12 +305,29 @@ class MapLocDataset(torchdata.Dataset):
                 image, size_out, cam, valid, crop_and_center=True
             )
         elif self.cfg.resize_image is not None:
+            # Resize so the longest edge = resize_image (preserves aspect ratio).
+            # fn=max keeps a 512x288 widescreen image at 512x288 rather than squishing.
             image, _, cam, valid = resize_image(
                 image, self.cfg.resize_image, fn=max, camera=cam, valid=valid
             )
             if self.cfg.pad_to_square:
-                # pad such that both edges are of the given size
-                image, valid, cam = pad_image(image, self.cfg.resize_image, cam, valid)
+                # Center the image in the square canvas.
+                # pad_image with crop_and_center=False anchors at top-left (bottom-only padding).
+                # We directly compute a centered placement instead.
+                size_sq = self.cfg.resize_image
+                *c, h_cur, w_cur = image.shape
+                h_sq = w_sq = size_sq
+                pad_top    = (h_sq - h_cur) // 2
+                pad_left   = (w_sq - w_cur) // 2
+                out_img    = torch.zeros((*c, h_sq, w_sq), dtype=image.dtype)
+                out_valid  = torch.zeros((h_sq, w_sq), dtype=torch.bool)
+                out_img[..., pad_top:pad_top+h_cur, pad_left:pad_left+w_cur]   = image
+                out_valid[    pad_top:pad_top+h_cur, pad_left:pad_left+w_cur]  = (
+                    valid if valid is not None else torch.ones((h_cur, w_cur), dtype=torch.bool)
+                )
+                # Adjust camera principal point for the offset
+                cam = cam.crop((-pad_left, -pad_top), (w_sq, h_sq))
+                image, valid = out_img, out_valid
 
         if self.cfg.reduce_fov is not None:
             h, w = image.shape[-2:]

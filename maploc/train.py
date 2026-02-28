@@ -1,5 +1,23 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+import torch.serialization
+import typing
+import omegaconf
 
+torch.serialization.add_safe_globals([
+    typing.Any,
+    omegaconf.dictconfig.DictConfig,
+    omegaconf.listconfig.ListConfig,
+    omegaconf.base.ContainerMetadata,
+])
+import torch
+
+_original_load = torch.load
+
+def _load_no_weights_only(*args, **kwargs):
+    kwargs['weights_only'] = False
+    return _original_load(*args, **kwargs)
+
+torch.load = _load_no_weights_only
 import os.path as osp
 from typing import Optional
 from pathlib import Path
@@ -14,6 +32,49 @@ from . import logger, pl_logger, EXPERIMENTS_PATH
 from .data import modules as data_modules
 from .module import GenericModule
 import numpy as np 
+from datetime import datetime
+
+
+# This fixes the PyTorch 2.6 "Weights only load failed" error for OmegaConf
+import omegaconf
+import typing
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+import os
+
+# 1. FORCE THE FIX FIRST (Must be before ANY other imports)
+os.environ["TORCH_FORCE_WEIGHTS_ONLY_LOAD"] = "0"
+
+# 2. NOW DO REGULAR IMPORTS
+import os.path as osp
+from typing import Optional, Any
+from pathlib import Path
+from datetime import datetime
+
+import numpy as np
+import torch
+import omegaconf
+import hydra
+import pytorch_lightning as pl
+from omegaconf import DictConfig, OmegaConf
+from pytorch_lightning.loggers import CometLogger
+from pytorch_lightning.utilities import rank_zero_only
+
+# Optional: Add safe globals ONLY for the ones we know are stable
+# This acts as a backup in case the environment variable isn't picked up
+try:
+    torch.serialization.add_safe_globals([
+        omegaconf.base.ContainerMetadata,
+        omegaconf.dictconfig.DictConfig,
+        omegaconf.listconfig.ListConfig,
+    ])
+except Exception:
+    pass
+
+# ... rest of your code (CleanProgressBar, etc.)
+# ... the rest of your imports ...
+# ... rest of your imports
 
 class CleanProgressBar(pl.callbacks.TQDMProgressBar):
     def get_metrics(self, trainer, model):
@@ -142,14 +203,14 @@ def train(cfg: DictConfig, job_id: Optional[int] = None):
         dirpath=experiment_dir,
         filename="checkpoint-{step}",
         save_last=True,
-        every_n_train_steps=20000,
+        every_n_train_steps=10000,
         verbose=True,
         **cfg.training.checkpointing,
     )
     checkpointing_step.CHECKPOINT_NAME_LAST = "last-step"
 
     strategy = "auto"
-    if cfg.experiment.gpus > 1:
+    if cfg.experiment.gpus > 1: 
         strategy = pl.strategies.DDPStrategy(find_unused_parameters=False)
         for split in ["train", "val"]:
             cfg.data["loading"][split].batch_size = (
@@ -162,11 +223,13 @@ def train(cfg: DictConfig, job_id: Optional[int] = None):
     data = data_modules[cfg.data.get("name", "mapillary")](cfg.data)
 
     # Initialize Comet
+    run_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     comet_logger = CometLogger(
         api_key="fC6GESL10yERCjD7gVOyHc5S2", # Or leave blank if using .comet.config
         project_name="mia-osmloc",
         workspace="sameep54",
-        experiment_name=cfg.experiment.name,
+        experiment_name=f"{cfg.experiment.name}_{run_time}"
     )
 
     # In the callbacks list, add the logger

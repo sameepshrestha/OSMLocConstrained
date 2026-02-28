@@ -17,7 +17,7 @@ model:
     features: 128
     out_dim: ${model.latent_dim}
     out_channels: [96, 192, 384, 768]
-    ckpt: "checkpoints/depth_anything/depth_anything_${.encoder}14.pth"
+    ckpt: "/home/sameep/phd_research/osmloc/OSMLocConstrained/experiments/mia_v1_run/depth_anything_v2_vitb.pth"
     shallow_encoder:
       backbone:
         encoder: resnet101

@@ -153,12 +153,15 @@ class DPT_DINOv2(nn.Module):
 
         if val == False:
             if ckpt is not None:
-                ckpt = torch.load(ckpt)
-                model_dict = self.state_dict()
-                for name, params in ckpt.items():
-                    if name in model_dict.keys():
-                        model_dict[name] = params
-                self.load_state_dict(model_dict)
+                try:
+                    ckpt_dict = torch.load(ckpt)
+                    model_dict = self.state_dict()
+                    for name, params in ckpt_dict.items():
+                        if name in model_dict.keys():
+                            model_dict[name] = params
+                    self.load_state_dict(model_dict)
+                except Exception as e:
+                    print(f"Warning: Failed to load pretrained checkpoint from {ckpt}: {e}")
 
         dim = self.pretrained.blocks[0].attn.qkv.in_features
         

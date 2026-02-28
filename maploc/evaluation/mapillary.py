@@ -79,7 +79,7 @@ split_configs = {
     "brisbane": split_brisbane,
     "detroit": split_detroit,
     "munich": split_munich,
-    "gmu_robot":split_gmu
+    "gmu_robot": split_gmu,
 }
 
 

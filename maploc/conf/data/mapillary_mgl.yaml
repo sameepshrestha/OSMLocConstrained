@@ -16,7 +16,7 @@ split: splits_MGL_13loc.json
 # split: imgid_cd.json
 loading:
   train:
-    batch_size: 4
+    batch_size: 2
     num_workers: ${.batch_size}
   val:
     batch_size: ${..train.batch_size}

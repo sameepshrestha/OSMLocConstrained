@@ -39,7 +39,7 @@ def plot_example_single(
     pred,
     data,
     results,
-    plot_bev=False,
+    plot_bev=True,
     out_dir=None,
     fig_for_paper=False,
     show_gps=True,
@@ -131,7 +131,7 @@ def plot_example_single(
             ha="left",
             color="w",
         )
-        plt.show()
+        # plt.show()
         if out_dir is not None:
             name_ = name.replace("/", "_")
             p = str(out_dir / f"{scene}_{name_}_{{}}.png")
@@ -206,7 +206,6 @@ def plot_example_single(
             dpi=50,
             cmaps="jet",
         )
-        plt.show()
 
         if out_dir is not None:
             save_plot(p.format("bev"))

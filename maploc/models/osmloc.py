@@ -126,8 +126,8 @@ class osmloc(BaseModel):
         self.scale_classifier = torch.nn.Linear(conf.latent_dim, conf.num_scale_bins)
         # self.scale_classifier = ConvModule(conf.latent_dim, 64, 64)
         self.sem_classifier = torch.nn.Sequential(torch.nn.Conv2d(conf.latent_dim,conf.map_encoder.embedding_dim,1),
-                                                              torch.nn.BatchNorm2d(conf.map_encoder.embedding_dim),torch.nn.ReLU(),
-                                                              torch.nn.Conv2d(conf.map_encoder.embedding_dim,conf.map_encoder.embedding_dim * 3 ,1))
+                                                            torch.nn.BatchNorm2d(conf.map_encoder.embedding_dim),torch.nn.ReLU(),
+                                                            torch.nn.Conv2d(conf.map_encoder.embedding_dim,conf.map_encoder.embedding_dim * 3 ,1))
 
         if conf.bev_net is None:
             self.feature_projection = torch.nn.Linear(
@@ -175,7 +175,6 @@ class osmloc(BaseModel):
         output = self.image_encoder(data["image"])
         f_image = output["features"]
         disparity = output["depth"]
-        
         camera = data["camera"].scale(1 / 2.0)
         camera = camera.to(data["image"].device, non_blocking=True)
 

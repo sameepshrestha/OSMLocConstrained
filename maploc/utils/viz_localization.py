@@ -92,14 +92,9 @@ def plot_dense_rotations(
 
 def copy_image(im, ax):
     prop = im.properties()
-    prop.pop("children")
-    prop.pop("size")
-    prop.pop("tightbbox")
-    prop.pop("transformed_clip_path_and_affine")
-    prop.pop("window_extent")
-    prop.pop("figure")
-    prop.pop("transform")
-    prop.pop("shape", None)
+    for k in ["children", "size", "tightbbox", "transformed_clip_path_and_affine", 
+              "window_extent", "figure", "transform", "shape"]:
+         prop.pop(k, None)
     return ax.imshow(im.get_array(), **prop)
 
 

@@ -43,7 +43,8 @@ def depth_loss(depth,disparity,valid):
     """
     depth = interpolate(depth,size = valid.shape[2:],mode = 'bilinear')
     disparity = interpolate(disparity,size = valid.shape[2:],mode = 'bilinear')
-    pred_disparity = 1.0 / depth
+    pred_disparity = 1.0 / (depth+ .000001)
+
     # pred_disparity_norm = (pred_disparity - pred_disparity[valid].min()) / (pred_disparity[valid].max() - pred_disparity[valid].min())
     # disparity_norm = (disparity - disparity[valid].min()) / (disparity[valid].max() - disparity[valid].min())
     pred_disparity_norm = mask_norm(pred_disparity,valid)
@@ -82,6 +83,7 @@ class TemplateSampler(torch.nn.Module):
             orig_y=(Δ - radius) / 2,
             orig_x=(Δ - radius) / 2,
             y_up=True,
+            device=grid_xz_bev.device,
         )
 
         if optimize:
@@ -151,7 +153,7 @@ def conv2d_fft_batchwise(signal, kernel, padding="same", padding_mode="constant"
     crop_slices = [slice(0, output.size(0)), slice(0, output.size(1))] + [
         slice(0, (signal.size(i) - kernel.size(i) + 1)) for i in [-2, -1]
     ]
-    output = output[crop_slices].contiguous()
+    output = output[tuple(crop_slices)].contiguous()
 
     return output
 
@@ -467,3 +469,60 @@ def fuse_gps(log_prob, uv_gps, ppm, sigma=10, gaussian=False):
         gps_log_prob = torch.where(dist < sigma_pixel**2, 1, -np.inf)
     log_prob_fused = log_softmax_spatial(log_prob + gps_log_prob.unsqueeze(-1))
     return log_prob_fused
+
+def match_masks_fft(query_mask, target_map, ppm, num_rotations=256, device='cpu'):
+    """
+    Match a query mask (BEV prediction) against a target map (GT mask) using FFT.
+    
+    Args:
+        query_mask: (1, C, H, W) Tensor. The template to search for.
+        target_map: (1, C, H_map, W_map) Tensor. The search space.
+        ppm: pixels per meter (unused in this simplified version but kept for API).
+        num_rotations: Number of rotations to search.
+        device: 'cpu' or 'cuda'.
+        
+    Returns:
+        scores: (1, H_map, W_map, Num_Rotations) The matching scores.
+    """
+    import torchvision.transforms.functional as TF
+
+    if query_mask.ndim == 3:
+        query_mask = query_mask.unsqueeze(0)
+    if target_map.ndim == 3:
+        target_map = target_map.unsqueeze(0)
+        
+    B, C, Hq, Wq = query_mask.shape
+    Bm, Cm, Hm, Wm = target_map.shape
+    
+    assert B == 1 and Bm == 1, "Batch size 1 supported for now"
+    assert C == Cm, f"Channel mismatch: Query {C} vs Target {Cm}"
+    
+    # 1. Generate rotated templates
+    angles = torch.linspace(0, 360, num_rotations + 1)[:-1] # [0, 360)
+    query_stack = []
+    
+    for angle in angles:
+        # Rotate query (counter-clockwise)
+        # Note: We rotate the query. 
+        # Ideally we should use the same rotation logic as TemplateSampler (rotmat2d)
+        # TF.rotate is consistent enough for now.
+        query_rot = TF.rotate(query_mask, angle.item(), interpolation=TF.InterpolationMode.BILINEAR)
+        query_stack.append(query_rot)
+        
+    # Stack: (1, N, C, H, W)
+    query_kernel = torch.stack(query_stack, dim=1)
+    
+    # 2. Convolve using batched FFT
+    # target_map: (1, C, H, W)
+    # query_kernel: (1, N, C, H, W)
+    # conv2d_fft_batchwise will compute: einsum("bc...,bdc...->bd...")
+    # This sums over C (channel) dimension, which is what we want (dot product over channels).
+    
+    scores = conv2d_fft_batchwise(target_map.float(), query_kernel.float())
+    # scores: (1, N, H_map, W_map)
+    
+    # Rearrange to (1, H, W, N) to match expected output format
+    scores = scores.permute(0, 2, 3, 1)
+    
+    return scores
+

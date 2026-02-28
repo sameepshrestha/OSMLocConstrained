@@ -1,3 +1,6 @@
+> [!NOTE] 
+> 📝 **Original Repo Modifications**: A full breakdown of our dataset implementations and script additions to this repository can be found in [MODIFICATIONS_README.md](MODIFICATIONS_README.md).
+
 <h2> 
 <a href="https://whu-usi3dv.github.io/OSMLoc/" target="_blank">OSMLoc: Single Image-Based Visual Localization in OpenStreetMap with Fused Geometric and Semantic Guidance</a>
 </h2>

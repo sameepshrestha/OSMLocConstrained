@@ -139,7 +139,7 @@ def evaluate_single_image(
     start_frame = 900
     ppm = model.model.conf.pixel_per_meter
     metrics = MetricCollection(model.model.metrics())
-    metrics["directional_error"] = LateralLongitudinalError(ppm)
+    metrics["directional_error"] = jus(ppm)
     metrics["rmse"] = rmse(ppm)
     if has_gps:
         metrics["xy_gps_error"] = Location2DError("uv_gps", ppm)
@@ -154,8 +154,6 @@ def evaluate_single_image(
     for i, batch_ in enumerate(
         islice(tqdm(dataloader, total=num, disable=not progress), num)
     ):
-        if i <784:
-            continue
         batch = model.transfer_batch_to_device(batch_, model.device, i)
         # Ablation: mask semantic classes
         if mask_index is not None:
