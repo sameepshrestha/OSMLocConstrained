@@ -254,7 +254,6 @@ def train(cfg: DictConfig, job_id: Optional[int] = None):
         logger=comet_logger,
         callbacks=callbacks,
         strategy=strategy,
-        check_val_every_n_epoch=1,
         accelerator="gpu",
         num_nodes=1,
         **cfg.training.trainer,

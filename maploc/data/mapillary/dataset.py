@@ -227,6 +227,13 @@ class MapillaryDataModule(pl.LightningDataModule):
                 elif self.cfg.filter_for == "pointcloud":
                     if len(view["observations"]) < self.cfg.min_num_points:
                         continue
+
+                # addition filter added for the semantic mask task, to filter out views that do not have an on-disk semantic mask file        
+                elif self.cfg.filter_for == "semantic_mask":
+                    # Keep only views that have an on-disk semantic mask file.
+                    mask_path = self.mask_dirs.get(scene) / (name + ".npz")
+                    if not mask_path.exists():
+                        continue
                 elif self.cfg.filter_for is not None:
                     raise ValueError(f"Unknown filtering: {self.cfg.filter_for}")
                 names_select.append((scene, seq, name))

@@ -48,5 +48,3 @@ These tracked files originating from the official OSMLoc repository were modifie
   * Implemented PyTorch 2.6+ fixes resolving the `Weights only load failed` exception associated with OmegaConf/Hydra loading mechanisms.
   * Added initialization for `CometLogger` allowing comprehensive ML run tracking directly to a custom Workspace (`sameep54` / `mia-osmloc`), complete with timestamp-based experiment naming.
 
-## Note on Test Scripts
-Various `test_*.py`, `debug_*.py`, and `cleanup_*.py` files that were generated during rapid iterative development and testing have been removed to keep the repository clean.

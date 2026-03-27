@@ -1,0 +1,40 @@
+defaults:
+  - data: mapillary_mgl
+  - training
+  - _self_
+
+data:
+  filter_for: semantic_mask
+
+experiment:
+  name: generative_osmloc
+
+model:
+  name: generative_osmloc
+  latent_dim: 128
+  matching_dim: 8
+  z_max: 32
+  x_max: 32
+  pixel_per_meter: ${data.pixel_per_meter}
+  num_rotations: 64
+  image_encoder:
+    encoder: "vitb"
+    features: 128
+    out_dim: ${model.latent_dim}
+    out_channels: [96, 192, 384, 768]
+    ckpt: "/home/sameep/phd_research/osmloc/OSMLocConstrained/experiments/mia_v1_run/depth_anything_v2_vitb.pth"
+    shallow_encoder:
+      backbone:
+        encoder: resnet101
+  map_encoder:
+    embedding_dim: 16
+    output_dim: ${..matching_dim}
+    num_classes: ${data.num_classes}
+    backbone:
+      encoder: vgg19
+      pretrained: false
+      output_scales: [0]
+      num_downsample: 3
+      decoder: [128, 64, 64]
+      padding: replicate
+    unary_prior: false

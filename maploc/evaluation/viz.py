@@ -17,6 +17,18 @@ from ..utils.viz_localization import (
 )
 from ..osm.viz import Colormap, plot_nodes
 
+SEMANTIC_CLASS_NAMES = [
+    "cls0",
+    "cls1",
+    "cls2",
+    "cls3",
+    "cls4",
+    "cls5",
+    "cls6",
+    "cls7",
+    "cls8",
+]
+
 def crop_map(map,uv,yaw,bev_size):
     map_size = map.new_tensor(map.shape[-2:][::-1])
     grid_uv = make_grid(bev_size[0],bev_size[1],step_x = 1,step_y = 1,orig_x = -(bev_size[0] // 2),orig_y = -bev_size[1],y_up = False,device = bev_size.device)
@@ -31,6 +43,92 @@ def crop_map(map,uv,yaw,bev_size):
     mask_map[grid_uv[...,0].abs() > grid_uv[...,1].abs()] = False
     
     return feats_m_crop,mask_map
+
+
+def _to_semantic_prob(x):
+    if x is None:
+        return None
+    x = x.detach().cpu()
+    if x.dtype == torch.bool:
+        return x.float()
+    if x.min() < 0 or x.max() > 1:
+        x = x.sigmoid()
+    return x.float()
+
+
+def _plot_semantic_tensor_grid(tensor, title_prefix, class_names=None, mask=None, out_path=None):
+    tensor = _to_semantic_prob(tensor)
+    if tensor is None:
+        return
+
+    if tensor.ndim != 3:
+        raise ValueError(f"Expected semantic tensor with shape [C,H,W], got {tensor.shape}")
+
+    num_classes = tensor.shape[0]
+    if class_names is None:
+        class_names = [f"cls{i}" for i in range(num_classes)]
+    elif len(class_names) < num_classes:
+        class_names = list(class_names) + [f"cls{i}" for i in range(len(class_names), num_classes)]
+
+    imgs = []
+    titles = []
+    for idx in range(num_classes):
+        img = tensor[idx].numpy()
+        if mask is not None:
+            img = np.where(mask, img, np.nan)
+        imgs.append(img)
+        titles.append(f"{title_prefix}: {class_names[idx]}")
+
+    plot_images(imgs, titles=titles, dpi=70, cmaps=["magma"] * num_classes, pad=0.2)
+    if out_path is not None:
+        save_plot(out_path)
+    plt.close()
+
+
+def _plot_semantic_summary(pred, data, out_prefix):
+    class_names = SEMANTIC_CLASS_NAMES
+    if "semantic_mask" in data:
+        _plot_semantic_tensor_grid(
+            data["semantic_mask"],
+            "GT map",
+            class_names=class_names,
+            out_path=f"{out_prefix}_semantic_map_gt.png",
+        )
+
+    if "sem_map" in pred:
+        _plot_semantic_tensor_grid(
+            pred["sem_map"],
+            "Pred map",
+            class_names=class_names,
+            out_path=f"{out_prefix}_semantic_map_pred.png",
+        )
+
+    sem_bev_valid = pred.get("sem_bev_valid")
+    if sem_bev_valid is not None:
+        sem_bev_valid = sem_bev_valid[0].detach().cpu().bool().numpy()
+
+    if "sem_bev_target" in pred:
+        _plot_semantic_tensor_grid(
+            pred["sem_bev_target"],
+            "GT BEV",
+            class_names=class_names,
+            mask=sem_bev_valid,
+            out_path=f"{out_prefix}_semantic_bev_gt.png",
+        )
+
+    if "sem_bev" in pred:
+        _plot_semantic_tensor_grid(
+            pred["sem_bev"],
+            "Pred BEV",
+            class_names=class_names,
+            mask=sem_bev_valid,
+            out_path=f"{out_prefix}_semantic_bev_pred.png",
+        )
+
+    if sem_bev_valid is not None:
+        plot_images([sem_bev_valid.astype(np.float32)], titles=["BEV valid"], dpi=80, cmaps="gray")
+        save_plot(f"{out_prefix}_semantic_bev_valid.png")
+        plt.close()
 
 
 def plot_example_single(
@@ -137,6 +235,9 @@ def plot_example_single(
             p = str(out_dir / f"{scene}_{name_}_{{}}.png")
             save_plot(p.format("pred"))
             plt.close()
+
+            if any(k in pred for k in ("sem_bev", "sem_map", "sem_bev_target")):
+                _plot_semantic_summary(pred, data, str(out_dir / f"{scene}_{name_}"))
 
             if fig_for_paper:
                 # !cp ../datasets/MGL/{scene}/images/{name}.jpg {out_dir}/{scene}_{name}.jpg

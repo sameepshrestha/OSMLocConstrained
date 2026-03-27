@@ -1,4 +1,3 @@
-
 import argparse
 from pathlib import Path
 from omegaconf import OmegaConf
@@ -17,10 +16,12 @@ from maploc.data.torch import collate, unbatch_to_device
 from maploc.utils.geo import Projection, BoundaryBox
 from maploc.evaluation.viz import plot_example_single # Added Viz import
 
+
 def angle_error(t1, t2):
     """Compute angular error between two angles in degrees."""
     diff = (t1 - t2) % 360
     return min(diff, 360 - diff)
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -284,6 +285,7 @@ def main():
             f_handle.close()
 
     print("Evaluation complete. Results saved with visualizations.")
+
 
 if __name__ == "__main__":
     main()
